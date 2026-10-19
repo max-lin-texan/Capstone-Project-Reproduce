@@ -1,0 +1,14 @@
+[project]
+name = "capstone-project-reproduce"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+capstone-project-reproduce = "capstone_project_reproduce:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
