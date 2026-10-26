@@ -13,3 +13,7 @@ wheels/
 data/
 results/
 docs/
+
+# SLURM files
+*.sbatch
+*.out
