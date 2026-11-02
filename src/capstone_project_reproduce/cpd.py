@@ -3,6 +3,8 @@
 Each feature is z-scored across patients and hours. Ranks 1-5 are fitted with
 several random starts. Factors, a fit summary, and a fit-versus-rank plot are
 saved under results/cpd_mean/, results/cpd_median/, or results/cpd_last/.
+``--new`` reads the eleven-feature table and writes results/cpd_new_mean/,
+results/cpd_new_median/, or results/cpd_new_last/.
 """
 
 import argparse
@@ -17,11 +19,11 @@ import pandas as pd
 import pyttb as ttb
 
 from data_preprocessing import (
-    COLUMNS,
     DECIMAL_PLACES,
     FEATURES,
     IMPUTED_PATH,
     N_HOURS,
+    NEW_FEATURES,
     imputed_table_path,
 )
 
@@ -32,31 +34,40 @@ SEEDS = range(5)
 HOURS = list(range(N_HOURS))
 
 
-def cpd_results_dir(how: str) -> Path:
+def _features(features: list[str] | None) -> list[str]:
+    return list(FEATURES if features is None else features)
+
+
+def cpd_results_dir(how: str, new: bool = False) -> Path:
     """Result directory for this aggregation."""
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
-    return RESULTS_DIR.parent / f"cpd_{how}"
+    prefix = "cpd_new" if new else "cpd"
+    return RESULTS_DIR.parent / f"{prefix}_{how}"
 
 
-def prepare_imputed(how: str = "mean") -> Path:
+def prepare_imputed(how: str = "mean", new: bool = False) -> Path:
     """Return the completed hourly table written by data_preprocessing.py."""
-    path = imputed_table_path(how)
+    path = imputed_table_path(how, new=new)
     if not path.exists():
+        flag = " --new" if new else ""
         raise FileNotFoundError(
-            f"Missing {path.name}. Run: python data_preprocessing.py --how {how}"
+            f"Missing {path.name}. Run: python data_preprocessing.py --how {how}{flag}"
         )
     return path
 
 
-def load_hourly(path: Path = IMPUTED_PATH) -> pd.DataFrame:
+def load_hourly(path: Path = IMPUTED_PATH, features: list[str] | None = None) -> pd.DataFrame:
     """Read the imputed hourly table."""
-    return pd.read_csv(path, usecols=COLUMNS)
+    features = _features(features)
+    return pd.read_csv(path, usecols=["patientunitstayid", "hour", *features])
 
 
-def validate_hourly(df: pd.DataFrame) -> None:
+def validate_hourly(df: pd.DataFrame, features: list[str] | None = None) -> None:
     """Fail if any patient is missing an hour or a feature value."""
-    missing = set(COLUMNS) - set(df.columns)
+    features = _features(features)
+    columns = ["patientunitstayid", "hour", *features]
+    missing = set(columns) - set(df.columns)
     if missing:
         raise ValueError(f"Missing columns: {sorted(missing)}")
     hours = pd.to_numeric(df["hour"], errors="coerce")
@@ -67,28 +78,36 @@ def validate_hourly(df: pd.DataFrame) -> None:
     counts = df.groupby("patientunitstayid")["hour"].nunique()
     if not counts.eq(N_HOURS).all():
         raise ValueError("Every patient must have exactly one row in each hour")
-    values = df[FEATURES].to_numpy(dtype=float)
+    values = df[features].to_numpy(dtype=float)
     if not np.isfinite(values).all():
         raise ValueError("Tensor data contain NaN or infinite values")
 
 
-def arrange_tensor(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+def arrange_tensor(
+    df: pd.DataFrame,
+    features: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return patient ids and an array of shape (patient, feature, hour)."""
-    validate_hourly(df)
+    features = _features(features)
+    validate_hourly(df, features)
     ordered = df.sort_values(["patientunitstayid", "hour"], kind="mergesort")
     ids = ordered["patientunitstayid"].drop_duplicates().to_numpy()
-    values = ordered[FEATURES].to_numpy(dtype=float)
-    array = values.reshape(len(ids), N_HOURS, len(FEATURES)).transpose(0, 2, 1)
+    values = ordered[features].to_numpy(dtype=float)
+    array = values.reshape(len(ids), N_HOURS, len(features)).transpose(0, 2, 1)
     return ids, array
 
 
-def build_tensor(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+def build_tensor(
+    df: pd.DataFrame,
+    features: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Z-score each feature over all patients and hours."""
-    ids, array = arrange_tensor(df)
+    features = _features(features)
+    ids, array = arrange_tensor(df, features)
     mean = array.mean(axis=(0, 2), keepdims=True)
     std = array.std(axis=(0, 2), keepdims=True)
     if np.any(std <= 0):
-        constant = [FEATURES[k] for k in np.where(std[0, :, 0] <= 0)[0]]
+        constant = [features[k] for k in np.where(std[0, :, 0] <= 0)[0]]
         raise ValueError(f"Constant features: {constant}")
     return ids, (array - mean) / std
 
@@ -135,6 +154,7 @@ def save_factors(
     rank: int,
     ids: np.ndarray,
     results_dir: Path,
+    features: list[str] | None = None,
 ) -> None:
     """Save patient scores, feature loadings, time loadings, and weights."""
     columns = [f"comp{i + 1}" for i in range(rank)]
@@ -148,7 +168,7 @@ def save_factors(
         index=False,
         float_format=number_format,
     )
-    pd.DataFrame(feature, index=FEATURES, columns=columns).rename_axis("feature").to_csv(
+    pd.DataFrame(feature, index=_features(features), columns=columns).rename_axis("feature").to_csv(
         results_dir / f"rank{rank}_variable.csv",
         float_format=number_format,
     )
@@ -161,6 +181,77 @@ def save_factors(
         index=False,
         float_format=number_format,
     )
+
+
+FEATURE_LABELS = {
+    "arterial_bp_systolic": "SBP",
+    "heart_rate": "HR",
+    "respiratory_rate": "RR",
+    "base_excess": "BE",
+    "creatinine": "Cr",
+    "pt_inr": "INR",
+    "lactate": "Lac",
+    "wbc": "WBC",
+    "platelets": "Plt",
+    "oxygen_saturation": "SpO2",
+    "urine_output": "UO",
+}
+
+
+def plot_factor_figures(results_dir: Path) -> None:
+    """Draw one factor figure per saved rank in this results directory.
+
+    Each row is a component. Patients are a histogram of score times weight.
+    Features are bars and hours are a line. Feature panels share a vertical
+    scale, and so do the time panels. The weight stays out of those two modes.
+    """
+    colors = ["C0", "C1", "C2", "C3", "C4"]
+    for rank in RANKS:
+        patient_path = results_dir / f"rank{rank}_patient.csv"
+        if not patient_path.exists():
+            continue
+        patients = pd.read_csv(patient_path)
+        variables = pd.read_csv(results_dir / f"rank{rank}_variable.csv", index_col=0)
+        hours = pd.read_csv(results_dir / f"rank{rank}_time.csv", index_col=0)
+        weights = pd.read_csv(results_dir / f"rank{rank}_weights.csv").set_index("component")
+        names = [f"comp{i + 1}" for i in range(rank)]
+        feature_span = _padded_span(variables[names].to_numpy(dtype=float))
+        time_span = _padded_span(hours[names].to_numpy(dtype=float))
+
+        figure, axes = plt.subplots(rank, 3, figsize=(12, 2.6 * rank), squeeze=False)
+        for row, name in enumerate(names):
+            color = colors[row % len(colors)]
+            score = patients[name].to_numpy(dtype=float) * float(weights.loc[name, "weight"])
+            axes[row, 0].hist(score, bins=50, color=color)
+            axes[row, 0].set_ylabel(name)
+            labels = [FEATURE_LABELS.get(str(feature), str(feature)) for feature in variables.index]
+            axes[row, 1].bar(labels, variables[name], color=color)
+            if len(labels) > 7:
+                axes[row, 1].tick_params(axis="x", labelrotation=45)
+            axes[row, 1].set_ylim(feature_span)
+            axes[row, 2].plot(hours.index.astype(float), hours[name], color=color)
+            axes[row, 2].set_ylim(time_span)
+            axes[row, 2].set_xlim(-1, N_HOURS)
+        axes[0, 0].set_title("Patient")
+        axes[0, 1].set_title("Feature")
+        axes[0, 2].set_title("Time")
+        axes[-1, 0].set_xlabel("Score × weight")
+        axes[-1, 1].set_xlabel("Feature")
+        axes[-1, 2].set_xlabel("Hour")
+        figure.tight_layout()
+        figure.savefig(results_dir / f"rank{rank}_factors.png", dpi=150)
+        plt.close(figure)
+
+
+def _padded_span(values: np.ndarray) -> tuple[float, float]:
+    """Vertical range covering every component, with a small margin."""
+    low = float(np.min(values))
+    high = float(np.max(values))
+    if low == high:
+        pad = 1.0 if low == 0 else abs(low) * 0.1
+    else:
+        pad = 0.05 * (high - low)
+    return low - pad, high + pad
 
 
 def plot_fit(summary: pd.DataFrame, results_dir: Path, title: str | None = None) -> None:
@@ -183,16 +274,18 @@ def run_cpd(
     how: str = "mean",
     path: Path | None = None,
     results_dir: Path | None = None,
+    new: bool = False,
 ) -> pd.DataFrame:
     """Fit ranks 1-5 and save factors, the fit summary, and the plot."""
+    features = list(NEW_FEATURES if new else FEATURES)
     if path is None:
-        path = prepare_imputed(how)
+        path = prepare_imputed(how, new=new)
     if results_dir is None:
-        results_dir = cpd_results_dir(how)
+        results_dir = cpd_results_dir(how, new=new)
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"aggregation={how}")
-    frame = load_hourly(path)
-    ids, array = build_tensor(frame)
+    frame = load_hourly(path, features)
+    ids, array = build_tensor(frame, features)
     tensor = ttb.tensor(array)
     temporal = temporal_diagnostics(array)
     print(
@@ -203,7 +296,7 @@ def run_cpd(
     rows = []
     for rank in RANKS:
         (model, fit, seed), fits = fit_cp(tensor, rank)
-        save_factors(model, rank, ids, results_dir)
+        save_factors(model, rank, ids, results_dir, features)
         diagnostics = reconstruction_diagnostics(array, model)
         rows.append(
             {
@@ -225,6 +318,7 @@ def run_cpd(
     summary = pd.DataFrame(rows)
     summary.to_csv(results_dir / "fit_summary.csv", index=False, float_format=f"%.{DECIMAL_PLACES}f")
     plot_fit(summary, results_dir)
+    plot_factor_figures(results_dir)
     print(f"Results saved to {results_dir}")
     return summary
 
@@ -232,8 +326,15 @@ def run_cpd(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--how", choices=["mean", "median", "last"], default="mean")
+    parser.add_argument("--new", action="store_true")
+    parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
-    run_cpd(how=args.how)
+    if args.plot_only:
+        results_dir = cpd_results_dir(args.how, new=args.new)
+        plot_factor_figures(results_dir)
+        print(f"Factor figures saved to {results_dir}")
+        return
+    run_cpd(how=args.how, new=args.new)
 
 
 if __name__ == "__main__":

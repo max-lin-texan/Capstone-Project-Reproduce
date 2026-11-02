@@ -1,10 +1,14 @@
-"""Hourly grid and low-rank imputation for the seven sepsis features.
+"""Hourly grid and low-rank imputation for the sepsis features.
 
 The measurement table is minute-level and irregular. Imputation follows the
 alternating scheme in the paper: bin to hours, then alternate low-rank matrix
 completion with a per-patient integer time shift. A positive shift writes hour
 t into hour t + shift. The saved table has one row per patient and admission
 hour, with every feature cell filled.
+
+The default seven features read and write the original tables. ``--new`` adds
+white cells, platelets, oxygen saturation, and urine output, and uses the
+``_new`` tables.
 """
 
 import argparse
@@ -15,7 +19,9 @@ import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 MEASUREMENT_PATH = DATA_DIR / "sepsis_measurement.csv"
+MEASUREMENT_PATH_NEW = DATA_DIR / "sepsis_measurement_new.csv"
 IMPUTED_PATH = DATA_DIR / "sepsis_measurement_imputed.csv"
+IMPUTED_PATH_NEW = DATA_DIR / "sepsis_measurement_imputed_new.csv"
 N_HOURS = 120
 FEATURES = [
     "arterial_bp_systolic",
@@ -26,17 +32,31 @@ FEATURES = [
     "pt_inr",
     "lactate",
 ]
+NEW_FEATURES = [
+    *FEATURES,
+    "wbc",
+    "platelets",
+    "oxygen_saturation",
+    "urine_output",
+]
+# Urine is a volume. An hour's value is the sum of its readings, not a mean.
+VOLUME_FEATURES = frozenset({"urine_output"})
 COLUMNS = ["patientunitstayid", "hour", *FEATURES]
 DECIMAL_PLACES = 5
 
 
-def imputed_table_path(how: str) -> Path:
+def _features(features: list[str] | None) -> list[str]:
+    return list(FEATURES if features is None else features)
+
+
+def imputed_table_path(how: str, new: bool = False) -> Path:
     """Path of the completed hourly table for this aggregation."""
+    base = IMPUTED_PATH_NEW if new else IMPUTED_PATH
     if how == "mean":
-        return IMPUTED_PATH
+        return base
     if how not in {"median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
-    return IMPUTED_PATH.with_name(f"sepsis_measurement_imputed_{how}.csv")
+    return base.with_name(f"{base.stem}_{how}.csv")
 
 
 def load_measurements(path: Path = MEASUREMENT_PATH) -> pd.DataFrame:
@@ -44,15 +64,16 @@ def load_measurements(path: Path = MEASUREMENT_PATH) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def aggregate_last(frame: pd.DataFrame) -> pd.DataFrame:
+def aggregate_last(frame: pd.DataFrame, features: list[str] | None = None) -> pd.DataFrame:
     """One row per patient and hour, using the latest reading of each feature.
 
     Latest means the largest ``offset`` among non-missing values of that
     feature. Features recorded at different minutes stay in the same hour.
     """
+    features = _features(features)
     keys = ["patientunitstayid", "hour"]
     hourly = None
-    for feature in FEATURES:
+    for feature in features:
         observed = frame.loc[frame[feature].notna(), [*keys, "offset", feature]]
         if observed.empty:
             continue
@@ -61,49 +82,78 @@ def aggregate_last(frame: pd.DataFrame) -> pd.DataFrame:
         latest = latest[keys + [feature]]
         hourly = latest if hourly is None else hourly.merge(latest, on=keys, how="outer")
     if hourly is None:
-        return pd.DataFrame(columns=[*keys, *FEATURES])
-    for feature in FEATURES:
+        return pd.DataFrame(columns=[*keys, *features])
+    for feature in features:
         if feature not in hourly.columns:
             hourly[feature] = pd.NA
     return hourly
 
 
-def aggregate_hourly(measurements: pd.DataFrame, how: str = "mean") -> pd.DataFrame:
+def _sum_volume(frame: pd.DataFrame, feature: str) -> pd.DataFrame:
+    """Total volume in each patient-hour. Hours with no reading stay absent."""
+    keys = ["patientunitstayid", "hour"]
+    observed = frame.loc[frame[feature].notna(), [*keys, feature]]
+    if observed.empty:
+        return pd.DataFrame(columns=[*keys, feature])
+    return observed.groupby(keys, sort=False, as_index=False)[feature].sum()
+
+
+def aggregate_hourly(
+    measurements: pd.DataFrame,
+    how: str = "mean",
+    features: list[str] | None = None,
+) -> pd.DataFrame:
     """One row per patient and hour.
 
     Multiple readings of the same patient, feature, and hour are combined with
-    ``how``: ``"mean"``, ``"median"``, or ``"last"``. Hours are numbered 0
+    ``how``: ``"mean"``, ``"median"``, or ``"last"``. Urine output is the sum
+    of volumes in that hour for every choice of ``how``. Hours are numbered 0
     through 119. A reading at exactly 120 hours is placed in hour 119.
     """
+    features = _features(features)
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
-    frame = measurements.loc[:, ["patientunitstayid", "offset", *FEATURES]].copy()
+    levels = [feature for feature in features if feature not in VOLUME_FEATURES]
+    volumes = [feature for feature in features if feature in VOLUME_FEATURES]
+    frame = measurements.loc[:, ["patientunitstayid", "offset", *features]].copy()
     hour = (frame["offset"] // 60).astype("int64")
     keep = (hour >= 0) & (hour <= N_HOURS)
     frame = frame.loc[keep].copy()
     frame["hour"] = hour.loc[keep].clip(upper=N_HOURS - 1).to_numpy()
-    if how == "last":
-        hourly = aggregate_last(frame)
+    keys = ["patientunitstayid", "hour"]
+    if not levels:
+        hourly = pd.DataFrame(columns=keys)
+    elif how == "last":
+        hourly = aggregate_last(frame, levels)
     else:
-        grouped = frame.drop(columns=["offset"]).groupby(
-            ["patientunitstayid", "hour"], sort=False, as_index=False
-        )
-        hourly = getattr(grouped[FEATURES], how)()
-    return hourly.sort_values(["patientunitstayid", "hour"], kind="mergesort").reset_index(drop=True)
+        grouped = frame.drop(columns=["offset"]).groupby(keys, sort=False, as_index=False)
+        hourly = getattr(grouped[levels], how)()
+    for feature in volumes:
+        total = _sum_volume(frame, feature)
+        hourly = total if hourly.empty else hourly.merge(total, on=keys, how="outer")
+    for feature in features:
+        if feature not in hourly.columns:
+            hourly[feature] = pd.NA
+    hourly = hourly[keys + features]
+    return hourly.sort_values(keys, kind="mergesort").reset_index(drop=True)
 
 
-def hourly_to_tensor(hourly: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+def hourly_to_tensor(
+    hourly: pd.DataFrame,
+    features: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Pack the hourly table into a tensor of shape (patients, features, hours).
 
     Missing patient-hours stay NaN. Axis 0 follows ``patientunitstayid`` in
-    ascending order, and axis 1 follows ``FEATURES``.
+    ascending order, and axis 1 follows ``features``.
     """
+    features = _features(features)
     stays = hourly["patientunitstayid"].drop_duplicates().sort_values().to_numpy()
     index = pd.Index(stays)
-    tensor = np.full((len(stays), len(FEATURES), N_HOURS), np.nan, dtype=np.float64)
+    tensor = np.full((len(stays), len(features), N_HOURS), np.nan, dtype=np.float64)
     rows = index.get_indexer(hourly["patientunitstayid"])
     hours = hourly["hour"].to_numpy()
-    for feature_index, feature in enumerate(FEATURES):
+    for feature_index, feature in enumerate(features):
         values = pd.to_numeric(hourly[feature], errors="coerce").to_numpy(dtype=np.float64)
         observed = np.isfinite(values)
         tensor[rows[observed], feature_index, hours[observed]] = values[observed]
@@ -435,6 +485,7 @@ def fill_hourly_table(
     hourly: np.ndarray,
     imputed: np.ndarray,
     shifts: np.ndarray,
+    features: list[str] | None = None,
 ) -> pd.DataFrame:
     """One row per patient and hour, with every feature cell filled.
 
@@ -454,25 +505,34 @@ def fill_hourly_table(
             "hour": np.tile(np.arange(n_hours), n_patients),
         }
     )
-    for feature_index, feature in enumerate(FEATURES):
+    features = _features(features)
+    for feature_index, feature in enumerate(features):
         frame[feature] = filled[:, feature_index, :].reshape(-1)
-    return frame[COLUMNS]
+    return frame[["patientunitstayid", "hour", *features]]
 
 
-def round_features(filled: pd.DataFrame, places: int = DECIMAL_PLACES) -> pd.DataFrame:
-    """Round the seven feature columns. Identifiers and hour stay integers."""
+def round_features(
+    filled: pd.DataFrame,
+    places: int = DECIMAL_PLACES,
+    features: list[str] | None = None,
+) -> pd.DataFrame:
+    """Round the feature columns. Identifiers and hour stay integers."""
+    features = _features(features)
     rounded = filled.copy()
-    rounded[FEATURES] = rounded[FEATURES].round(places)
+    rounded[features] = rounded[features].round(places)
     return rounded
 
 
 def save_imputed_measurements(
     filled: pd.DataFrame,
     path: Path = IMPUTED_PATH,
+    features: list[str] | None = None,
 ) -> Path:
     """Write the filled measurement table with five digits after the decimal point."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    round_features(filled).to_csv(path, index=False, float_format=f"%.{DECIMAL_PLACES}f")
+    round_features(filled, features=features).to_csv(
+        path, index=False, float_format=f"%.{DECIMAL_PLACES}f"
+    )
     return path
 
 
@@ -487,11 +547,13 @@ def preprocess(
     n_sweeps: int = 5,
     tol: float = 1e-4,
     seed: int = 0,
+    new: bool = False,
 ) -> pd.DataFrame:
     """Aggregate to hours, impute, and save one row per patient-hour."""
+    features = list(NEW_FEATURES if new else FEATURES)
     measurements = load_measurements(measurement_path)
-    hourly_table = aggregate_hourly(measurements, how=how)
-    stays, hourly = hourly_to_tensor(hourly_table)
+    hourly_table = aggregate_hourly(measurements, how=how, features=features)
+    stays, hourly = hourly_to_tensor(hourly_table, features)
     observed = np.isfinite(hourly).mean()
     print(
         f"hourly tensor: {hourly.shape[0]:,} patients, {hourly.shape[1]} features, "
@@ -507,8 +569,8 @@ def preprocess(
         tol=tol,
         seed=seed,
     )
-    filled = fill_hourly_table(stays, hourly, imputed, shifts)
-    save_imputed_measurements(filled, output_path)
+    filled = fill_hourly_table(stays, hourly, imputed, shifts, features)
+    save_imputed_measurements(filled, output_path, features)
     print(f"saved {len(filled):,} rows to {output_path}")
     return filled
 
@@ -516,12 +578,14 @@ def preprocess(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--how", choices=["mean", "median", "last"], default="mean")
+    parser.add_argument("--new", action="store_true")
     args = parser.parse_args()
-    path = imputed_table_path(args.how)
+    path = imputed_table_path(args.how, new=args.new)
     if path.exists():
         print(f"reusing {path}")
         return
-    preprocess(output_path=path, how=args.how)
+    measurement_path = MEASUREMENT_PATH_NEW if args.new else MEASUREMENT_PATH
+    preprocess(measurement_path=measurement_path, output_path=path, how=args.how, new=args.new)
 
 
 if __name__ == "__main__":

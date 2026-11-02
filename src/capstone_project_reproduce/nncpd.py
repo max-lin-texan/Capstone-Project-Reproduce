@@ -23,13 +23,14 @@ from cpd import (
     SEEDS,
     arrange_tensor,
     load_hourly,
+    plot_factor_figures,
     plot_fit,
     prepare_imputed,
     reconstruction_diagnostics,
     save_factors,
     temporal_diagnostics,
 )
-from data_preprocessing import DECIMAL_PLACES, FEATURES
+from data_preprocessing import DECIMAL_PLACES, FEATURES, NEW_FEATURES
 
 # pyttb logs a harmless factor-matrix layout warning on every iteration.
 logging.getLogger().setLevel(logging.ERROR)
@@ -37,11 +38,12 @@ logging.getLogger().setLevel(logging.ERROR)
 RESULTS_DIR_NN = RESULTS_DIR.parent / "nncpd"
 
 
-def nncpd_results_dir(how: str) -> Path:
+def nncpd_results_dir(how: str, new: bool = False) -> Path:
     """Result directory for this aggregation."""
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
-    return RESULTS_DIR_NN.parent / f"nncpd_{how}"
+    prefix = "nncpd_new" if new else "nncpd"
+    return RESULTS_DIR_NN.parent / f"{prefix}_{how}"
 CLIP_PCT = (1, 99)
 NONNEG_GAUSSIAN = (handles.gaussian, handles.gaussian_grad, 0.0)
 MAXITER = 2000
@@ -49,15 +51,19 @@ PGTOL = 1e-5
 FACTR = 1e7
 
 
-def build_tensor(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+def build_tensor(
+    frame: pd.DataFrame,
+    features: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Clip each feature to its 1st-99th percentile, then scale it to [0, 1]."""
-    ids, array = arrange_tensor(frame)
+    features = list(FEATURES if features is None else features)
+    ids, array = arrange_tensor(frame, features)
     low = np.percentile(array, CLIP_PCT[0], axis=(0, 2), keepdims=True)
     high = np.percentile(array, CLIP_PCT[1], axis=(0, 2), keepdims=True)
     array = np.clip(array, low, high)
     scale = high - low
     if np.any(scale <= 0):
-        constant = [FEATURES[k] for k in np.where(scale[0, :, 0] <= 0)[0]]
+        constant = [features[k] for k in np.where(scale[0, :, 0] <= 0)[0]]
         raise ValueError(f"Zero percentile range: {constant}")
     scaled = (array - low) / scale
     if not np.isfinite(scaled).all():
@@ -96,16 +102,18 @@ def run_nncpd(
     how: str = "mean",
     path: Path | None = None,
     results_dir: Path | None = None,
+    new: bool = False,
 ) -> pd.DataFrame:
     """Fit ranks 1-5 and save factors, the fit summary, and the plot."""
+    features = list(NEW_FEATURES if new else FEATURES)
     if path is None:
-        path = prepare_imputed(how)
+        path = prepare_imputed(how, new=new)
     if results_dir is None:
-        results_dir = nncpd_results_dir(how)
+        results_dir = nncpd_results_dir(how, new=new)
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"aggregation={how}")
-    frame = load_hourly(path)
-    ids, array = build_tensor(frame)
+    frame = load_hourly(path, features)
+    ids, array = build_tensor(frame, features)
     tensor = ttb.tensor(array)
     temporal = temporal_diagnostics(array)
     print(
@@ -116,7 +124,7 @@ def run_nncpd(
     rows = []
     for rank in RANKS:
         (model, fit, seed), fits = fit_nncp(tensor, rank)
-        save_factors(model, rank, ids, results_dir)
+        save_factors(model, rank, ids, results_dir, features)
         diagnostics = reconstruction_diagnostics(array, model)
         rows.append(
             {
@@ -146,6 +154,7 @@ def run_nncpd(
         results_dir,
         title=f"Non-negative CP fit vs rank (best of {len(SEEDS)} starts)",
     )
+    plot_factor_figures(results_dir)
     print(f"Results saved to {results_dir}")
     return summary
 
@@ -153,8 +162,15 @@ def run_nncpd(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--how", choices=["mean", "median", "last"], default="mean")
+    parser.add_argument("--new", action="store_true")
+    parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
-    run_nncpd(how=args.how)
+    if args.plot_only:
+        results_dir = nncpd_results_dir(args.how, new=args.new)
+        plot_factor_figures(results_dir)
+        print(f"Factor figures saved to {results_dir}")
+        return
+    run_nncpd(how=args.how, new=args.new)
 
 
 if __name__ == "__main__":
