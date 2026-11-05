@@ -19,7 +19,7 @@ from pyttb.gcp.optimizers import LBFGSB
 
 from cpd import (
     RANKS,
-    RESULTS_DIR,
+    RESULTS_ROOT,
     SEEDS,
     arrange_tensor,
     load_hourly,
@@ -35,15 +35,14 @@ from data_preprocessing import DECIMAL_PLACES, FEATURES, NEW_FEATURES
 # pyttb logs a harmless factor-matrix layout warning on every iteration.
 logging.getLogger().setLevel(logging.ERROR)
 
-RESULTS_DIR_NN = RESULTS_DIR.parent / "nncpd"
-
-
 def nncpd_results_dir(how: str, new: bool = False) -> Path:
     """Result directory for this aggregation."""
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
-    prefix = "nncpd_new" if new else "nncpd"
-    return RESULTS_DIR_NN.parent / f"{prefix}_{how}"
+    panel = "feature_11" if new else "feature_7"
+    return RESULTS_ROOT / panel / f"nncpd_{how}"
+
+
 CLIP_PCT = (1, 99)
 NONNEG_GAUSSIAN = (handles.gaussian, handles.gaussian_grad, 0.0)
 MAXITER = 2000
@@ -104,7 +103,7 @@ def run_nncpd(
     results_dir: Path | None = None,
     new: bool = False,
 ) -> pd.DataFrame:
-    """Fit ranks 1-5 and save factors, the fit summary, and the plot."""
+    """Fit ranks 1-10 and save factors, the fit summary, and the plot."""
     features = list(NEW_FEATURES if new else FEATURES)
     if path is None:
         path = prepare_imputed(how, new=new)

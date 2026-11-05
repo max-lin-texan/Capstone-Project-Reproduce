@@ -1,10 +1,10 @@
 """CP decomposition of the imputed hourly tensor (patient x feature x hour).
 
-Each feature is z-scored across patients and hours. Ranks 1-5 are fitted with
+Each feature is z-scored across patients and hours. Ranks 1-10 are fitted with
 several random starts. Factors, a fit summary, and a fit-versus-rank plot are
-saved under results/cpd_mean/, results/cpd_median/, or results/cpd_last/.
-``--new`` reads the eleven-feature table and writes results/cpd_new_mean/,
-results/cpd_new_median/, or results/cpd_new_last/.
+saved under results/feature_7/cpd_mean/, cpd_median/, or cpd_last/.
+``--new`` reads the eleven-feature table and writes the same names under
+results/feature_11/.
 """
 
 import argparse
@@ -28,8 +28,8 @@ from data_preprocessing import (
 )
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-RESULTS_DIR = PROJECT_DIR / "results" / "cpd"
-RANKS = range(1, 6)
+RESULTS_ROOT = PROJECT_DIR / "results"
+RANKS = range(1, 11)
 SEEDS = range(5)
 HOURS = list(range(N_HOURS))
 
@@ -42,8 +42,8 @@ def cpd_results_dir(how: str, new: bool = False) -> Path:
     """Result directory for this aggregation."""
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
-    prefix = "cpd_new" if new else "cpd"
-    return RESULTS_DIR.parent / f"{prefix}_{how}"
+    panel = "feature_11" if new else "feature_7"
+    return RESULTS_ROOT / panel / f"cpd_{how}"
 
 
 def prepare_imputed(how: str = "mean", new: bool = False) -> Path:
@@ -201,11 +201,12 @@ FEATURE_LABELS = {
 def plot_factor_figures(results_dir: Path) -> None:
     """Draw one factor figure per saved rank in this results directory.
 
-    Each row is a component. Patients are a histogram of score times weight.
-    Features are bars and hours are a line. Feature panels share a vertical
-    scale, and so do the time panels. The weight stays out of those two modes.
+    Each row is a component. Patients are a line of the factor score, sorted
+    from low to high. Features are bars and hours are a line. Feature panels
+    share a vertical scale, and so do the time panels. Each patient panel keeps
+    its own scale. The component weight is left out of all three panels.
     """
-    colors = ["C0", "C1", "C2", "C3", "C4"]
+    colors = [f"C{i}" for i in range(10)]
     for rank in RANKS:
         patient_path = results_dir / f"rank{rank}_patient.csv"
         if not patient_path.exists():
@@ -213,7 +214,6 @@ def plot_factor_figures(results_dir: Path) -> None:
         patients = pd.read_csv(patient_path)
         variables = pd.read_csv(results_dir / f"rank{rank}_variable.csv", index_col=0)
         hours = pd.read_csv(results_dir / f"rank{rank}_time.csv", index_col=0)
-        weights = pd.read_csv(results_dir / f"rank{rank}_weights.csv").set_index("component")
         names = [f"comp{i + 1}" for i in range(rank)]
         feature_span = _padded_span(variables[names].to_numpy(dtype=float))
         time_span = _padded_span(hours[names].to_numpy(dtype=float))
@@ -221,9 +221,12 @@ def plot_factor_figures(results_dir: Path) -> None:
         figure, axes = plt.subplots(rank, 3, figsize=(12, 2.6 * rank), squeeze=False)
         for row, name in enumerate(names):
             color = colors[row % len(colors)]
-            score = patients[name].to_numpy(dtype=float) * float(weights.loc[name, "weight"])
-            axes[row, 0].hist(score, bins=50, color=color)
+            score = patients[name].to_numpy(dtype=float)
+            ordered = np.sort(score)
+            axes[row, 0].plot(np.arange(len(ordered)), ordered, color=color, linewidth=0.8)
+            axes[row, 0].set_xlim(0, max(len(ordered) - 1, 1))
             axes[row, 0].set_ylabel(name)
+            axes[row, 0].margins(y=0.05)
             labels = [FEATURE_LABELS.get(str(feature), str(feature)) for feature in variables.index]
             axes[row, 1].bar(labels, variables[name], color=color)
             if len(labels) > 7:
@@ -235,7 +238,7 @@ def plot_factor_figures(results_dir: Path) -> None:
         axes[0, 0].set_title("Patient")
         axes[0, 1].set_title("Feature")
         axes[0, 2].set_title("Time")
-        axes[-1, 0].set_xlabel("Score × weight")
+        axes[-1, 0].set_xlabel("Patients, low to high")
         axes[-1, 1].set_xlabel("Feature")
         axes[-1, 2].set_xlabel("Hour")
         figure.tight_layout()
@@ -276,7 +279,7 @@ def run_cpd(
     results_dir: Path | None = None,
     new: bool = False,
 ) -> pd.DataFrame:
-    """Fit ranks 1-5 and save factors, the fit summary, and the plot."""
+    """Fit ranks 1-10 and save factors, the fit summary, and the plot."""
     features = list(NEW_FEATURES if new else FEATURES)
     if path is None:
         path = prepare_imputed(how, new=new)
