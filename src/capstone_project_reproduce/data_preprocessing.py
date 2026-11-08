@@ -9,6 +9,11 @@ hour, with every feature cell filled.
 The default seven features read and write the original tables. ``--new`` adds
 white cells, platelets, oxygen saturation, and urine output, and uses the
 ``_new`` tables.
+
+A patient enters the seven-feature table only when heart rate, respiratory
+rate, creatinine, and lactate were each recorded at least once. The
+eleven-feature table also requires white cells, platelets, and oxygen
+saturation. The other columns stay in the model and are imputed when missing.
 """
 
 import argparse
@@ -41,12 +46,95 @@ NEW_FEATURES = [
 ]
 # Urine is a volume. An hour's value is the sum of its readings, not a mean.
 VOLUME_FEATURES = frozenset({"urine_output"})
+# Required observations. These columns are not the full model.
+REQUIRED_FEATURES = [
+    "heart_rate",
+    "respiratory_rate",
+    "creatinine",
+    "lactate",
+]
+NEW_REQUIRED_FEATURES = [
+    *REQUIRED_FEATURES,
+    "wbc",
+    "platelets",
+    "oxygen_saturation",
+]
+ICD_PATH = DATA_DIR / "icd_by_stay.csv"
 COLUMNS = ["patientunitstayid", "hour", *FEATURES]
 DECIMAL_PLACES = 5
 
 
 def _features(features: list[str] | None) -> list[str]:
     return list(FEATURES if features is None else features)
+
+
+def required_features(new: bool = False) -> list[str]:
+    """Features a patient must have recorded at least once."""
+    return list(NEW_REQUIRED_FEATURES if new else REQUIRED_FEATURES)
+
+
+def screened_stay_ids(new: bool = False) -> set[int]:
+    """Stays in which every required feature was recorded at least once."""
+    cache = DATA_DIR / ("screened_stays_new.csv" if new else "screened_stays.csv")
+    source = MEASUREMENT_PATH_NEW if new else MEASUREMENT_PATH
+    if cache.exists() and cache.stat().st_mtime >= source.stat().st_mtime:
+        cached = pd.read_csv(cache, usecols=["patientunitstayid"])
+        return set(cached["patientunitstayid"].astype("int64"))
+    required = required_features(new)
+    found = {feature: set() for feature in required}
+    for chunk in pd.read_csv(source, usecols=["patientunitstayid", *required], chunksize=500_000):
+        stays = chunk["patientunitstayid"]
+        for feature in required:
+            present = stays.loc[chunk[feature].notna()]
+            if not present.empty:
+                found[feature].update(present.astype("int64").tolist())
+    chosen = set.intersection(*(found[feature] for feature in required)) if required else set()
+    pd.DataFrame({"patientunitstayid": sorted(chosen)}).to_csv(cache, index=False)
+    return chosen
+
+
+def ensure_icd_lookup(path: Path = ICD_PATH) -> pd.DataFrame:
+    """One ICD string per stay, saved before the old imputed table is replaced."""
+    if path.exists():
+        lookup = pd.read_csv(path, dtype={"icd_code": str})
+        lookup["patientunitstayid"] = lookup["patientunitstayid"].astype("int64")
+        return lookup.drop_duplicates("patientunitstayid")
+    if not IMPUTED_PATH.exists():
+        raise FileNotFoundError(f"Cannot build {path.name} without {IMPUTED_PATH.name}")
+    header = IMPUTED_PATH.open().readline()
+    if "icd_code" not in header.split(","):
+        raise FileNotFoundError(f"{IMPUTED_PATH.name} has no icd_code column")
+    parts = []
+    for chunk in pd.read_csv(
+        IMPUTED_PATH,
+        usecols=["patientunitstayid", "icd_code"],
+        dtype={"icd_code": str},
+        chunksize=500_000,
+    ):
+        parts.append(chunk.drop_duplicates("patientunitstayid"))
+    lookup = pd.concat(parts, ignore_index=True).drop_duplicates("patientunitstayid")
+    lookup["patientunitstayid"] = lookup["patientunitstayid"].astype("int64")
+    lookup["icd_code"] = lookup["icd_code"].fillna("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lookup.to_csv(path, index=False)
+    print(f"saved {len(lookup):,} ICD rows to {path}")
+    return lookup
+
+
+def imputed_is_current(path: Path, new: bool = False) -> bool:
+    """True when this file is the screened cohort with a complete hourly grid."""
+    if not path.exists():
+        return False
+    header = path.open().readline().strip().split(",")
+    features = list(NEW_FEATURES if new else FEATURES)
+    if any(feature not in header for feature in features):
+        return False
+    if not new and "icd_code" not in header:
+        return False
+    stays = pd.read_csv(path, usecols=["patientunitstayid"])["patientunitstayid"].astype("int64")
+    if stays.nunique() * N_HOURS != len(stays):
+        return False
+    return set(stays.unique()) == screened_stay_ids(new)
 
 
 def imputed_table_path(how: str, new: bool = False) -> Path:
@@ -551,7 +639,10 @@ def preprocess(
 ) -> pd.DataFrame:
     """Aggregate to hours, impute, and save one row per patient-hour."""
     features = list(NEW_FEATURES if new else FEATURES)
+    chosen = screened_stay_ids(new)
     measurements = load_measurements(measurement_path)
+    measurements = measurements.loc[measurements["patientunitstayid"].isin(chosen)].copy()
+    print(f"screened patients: {measurements['patientunitstayid'].nunique():,}")
     hourly_table = aggregate_hourly(measurements, how=how, features=features)
     stays, hourly = hourly_to_tensor(hourly_table, features)
     observed = np.isfinite(hourly).mean()
@@ -570,6 +661,11 @@ def preprocess(
         seed=seed,
     )
     filled = fill_hourly_table(stays, hourly, imputed, shifts, features)
+    if not new:
+        diagnoses = ensure_icd_lookup()
+        filled = filled.merge(diagnoses, on="patientunitstayid", how="left")
+        filled["icd_code"] = filled["icd_code"].fillna("")
+        filled = filled[["patientunitstayid", "icd_code", "hour", *features]]
     save_imputed_measurements(filled, output_path, features)
     print(f"saved {len(filled):,} rows to {output_path}")
     return filled
@@ -580,8 +676,9 @@ def main() -> None:
     parser.add_argument("--how", choices=["mean", "median", "last"], default="mean")
     parser.add_argument("--new", action="store_true")
     args = parser.parse_args()
+    ensure_icd_lookup()
     path = imputed_table_path(args.how, new=args.new)
-    if path.exists():
+    if imputed_is_current(path, new=args.new):
         print(f"reusing {path}")
         return
     measurement_path = MEASUREMENT_PATH_NEW if args.new else MEASUREMENT_PATH

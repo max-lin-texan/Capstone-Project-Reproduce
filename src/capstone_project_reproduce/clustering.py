@@ -24,6 +24,7 @@ from data_preprocessing import (
     FEATURES,
     N_HOURS,
     NEW_FEATURES,
+    imputed_is_current,
     imputed_table_path,
 )
 from hospitals import cohort_name, subset_stays
@@ -90,6 +91,12 @@ def load_imputed(
     features = list(FEATURES if features is None else features)
     if path is None:
         path = imputed_table_path("mean", new=new)
+    if not imputed_is_current(path, new=new):
+        flag = " --new" if new else ""
+        raise FileNotFoundError(
+            f"{path.name} is not the screened cohort. "
+            f"Run: python data_preprocessing.py --how mean{flag}"
+        )
     frame = pd.read_csv(path, usecols=["patientunitstayid", "hour", *features])
     frame = subset_stays(frame, hospital)
     if "icd_code" not in frame.columns:

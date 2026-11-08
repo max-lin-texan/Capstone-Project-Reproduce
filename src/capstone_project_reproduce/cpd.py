@@ -25,6 +25,7 @@ from data_preprocessing import (
     IMPUTED_PATH,
     N_HOURS,
     NEW_FEATURES,
+    imputed_is_current,
     imputed_table_path,
 )
 from hospitals import cohort_name, subset_stays
@@ -56,10 +57,11 @@ def decomposition_complete(results_dir: Path) -> bool:
 def prepare_imputed(how: str = "mean", new: bool = False) -> Path:
     """Return the completed hourly table written by data_preprocessing.py."""
     path = imputed_table_path(how, new=new)
-    if not path.exists():
+    if not imputed_is_current(path, new=new):
         flag = " --new" if new else ""
         raise FileNotFoundError(
-            f"Missing {path.name}. Run: python data_preprocessing.py --how {how}{flag}"
+            f"{path.name} is not the screened cohort. "
+            f"Run: python data_preprocessing.py --how {how}{flag}"
         )
     return path
 

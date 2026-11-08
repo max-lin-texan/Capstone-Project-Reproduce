@@ -1,10 +1,9 @@
 """Pairwise absolute-cosine heatmaps for the saved CP factors.
 
-One experiment and one rank produce two 15 by 15 heatmaps. The feature
-heatmap compares feature loadings. The time heatmap compares time loadings.
-Components are matched on the absolute product of those two cosines, then
-each heatmap summarizes the matched pairs with a geometric mean. The cohorts
-are overall and hospital_1 through hospital_14.
+One experiment and one rank produce two heatmaps, one for feature loadings
+and one for time loadings. Components are matched on the absolute product of
+those two cosines, then each heatmap summarizes the matched pairs with a
+geometric mean. The rows are overall and the hospitals in hospital_map.csv.
 """
 
 from pathlib import Path
@@ -120,7 +119,7 @@ def similarity_matrices(
 
 
 def save_heatmap(frame: pd.DataFrame, path: Path, title: str) -> None:
-    """Write the annotated 15 by 15 heatmap."""
+    """Write the annotated heatmap."""
     values = frame.to_numpy(float)
     figure, axis = plt.subplots(figsize=(12, 10))
     image = axis.imshow(values, vmin=0, vmax=1, cmap="viridis")
