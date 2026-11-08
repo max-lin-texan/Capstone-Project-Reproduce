@@ -2,9 +2,10 @@
 
 Each feature is z-scored across patients and hours. Ranks 1-10 are fitted with
 several random starts. Factors, a fit summary, and a fit-versus-rank plot are
-saved under results/feature_7/cpd_mean/, cpd_median/, or cpd_last/.
+saved under results/feature_7/overall/cpd_mean/, cpd_median/, or cpd_last/.
 ``--new`` reads the eleven-feature table and writes the same names under
-results/feature_11/.
+results/feature_11/. ``--hospital hospital_1`` uses one mapped hospital and
+writes under that name instead of overall.
 """
 
 import argparse
@@ -26,6 +27,7 @@ from data_preprocessing import (
     NEW_FEATURES,
     imputed_table_path,
 )
+from hospitals import cohort_name, subset_stays
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = PROJECT_DIR / "results"
@@ -38,12 +40,17 @@ def _features(features: list[str] | None) -> list[str]:
     return list(FEATURES if features is None else features)
 
 
-def cpd_results_dir(how: str, new: bool = False) -> Path:
-    """Result directory for this aggregation."""
+def cpd_results_dir(how: str, new: bool = False, hospital: str | None = None) -> Path:
+    """Result directory for this aggregation and cohort."""
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
     panel = "feature_11" if new else "feature_7"
-    return RESULTS_ROOT / panel / f"cpd_{how}"
+    return RESULTS_ROOT / panel / cohort_name(hospital) / f"cpd_{how}"
+
+
+def decomposition_complete(results_dir: Path) -> bool:
+    """True when ranks 1-10 were already saved in this directory."""
+    return (results_dir / "fit_summary.csv").exists() and (results_dir / "rank10_patient.csv").exists()
 
 
 def prepare_imputed(how: str = "mean", new: bool = False) -> Path:
@@ -201,10 +208,13 @@ FEATURE_LABELS = {
 def plot_factor_figures(results_dir: Path) -> None:
     """Draw one factor figure per saved rank in this results directory.
 
-    Each row is a component. Patients are a line of the factor score, sorted
-    from low to high. Features are bars and hours are a line. Feature panels
-    share a vertical scale, and so do the time panels. Each patient panel keeps
-    its own scale. The component weight is left out of all three panels.
+    Each row is a component. The patient panel is a bar for each of 50 patients
+    drawn with seed 1, in that draw order. The horizontal axis is the patient
+    and the vertical axis is the factor score. That draw is not applied to the
+    feature bars or the time line, which use the full-cohort loadings. Feature
+    panels share a vertical scale, and so do the time panels. Each patient
+    panel keeps its own scale. The component weight is left out of all three
+    panels.
     """
     colors = [f"C{i}" for i in range(10)]
     for rank in RANKS:
@@ -217,14 +227,16 @@ def plot_factor_figures(results_dir: Path) -> None:
         names = [f"comp{i + 1}" for i in range(rank)]
         feature_span = _padded_span(variables[names].to_numpy(dtype=float))
         time_span = _padded_span(hours[names].to_numpy(dtype=float))
+        rng = np.random.default_rng(1)
+        sample_size = min(50, len(patients))
+        sampled = patients.iloc[rng.choice(len(patients), size=sample_size, replace=False)]
 
         figure, axes = plt.subplots(rank, 3, figsize=(12, 2.6 * rank), squeeze=False)
         for row, name in enumerate(names):
             color = colors[row % len(colors)]
-            score = patients[name].to_numpy(dtype=float)
-            ordered = np.sort(score)
-            axes[row, 0].plot(np.arange(len(ordered)), ordered, color=color, linewidth=0.8)
-            axes[row, 0].set_xlim(0, max(len(ordered) - 1, 1))
+            score = sampled[name].to_numpy(dtype=float)
+            axes[row, 0].bar(np.arange(len(score)), score, color=color)
+            axes[row, 0].set_xlim(-1, len(score))
             axes[row, 0].set_ylabel(name)
             axes[row, 0].margins(y=0.05)
             labels = [FEATURE_LABELS.get(str(feature), str(feature)) for feature in variables.index]
@@ -238,7 +250,7 @@ def plot_factor_figures(results_dir: Path) -> None:
         axes[0, 0].set_title("Patient")
         axes[0, 1].set_title("Feature")
         axes[0, 2].set_title("Time")
-        axes[-1, 0].set_xlabel("Patients, low to high")
+        axes[-1, 0].set_xlabel("Patients")
         axes[-1, 1].set_xlabel("Feature")
         axes[-1, 2].set_xlabel("Hour")
         figure.tight_layout()
@@ -278,16 +290,20 @@ def run_cpd(
     path: Path | None = None,
     results_dir: Path | None = None,
     new: bool = False,
+    hospital: str | None = None,
 ) -> pd.DataFrame:
     """Fit ranks 1-10 and save factors, the fit summary, and the plot."""
     features = list(NEW_FEATURES if new else FEATURES)
+    if results_dir is None:
+        results_dir = cpd_results_dir(how, new=new, hospital=hospital)
+    if decomposition_complete(results_dir):
+        print(f"reusing {results_dir}")
+        return pd.read_csv(results_dir / "fit_summary.csv")
     if path is None:
         path = prepare_imputed(how, new=new)
-    if results_dir is None:
-        results_dir = cpd_results_dir(how, new=new)
     results_dir.mkdir(parents=True, exist_ok=True)
-    print(f"aggregation={how}")
-    frame = load_hourly(path, features)
+    print(f"aggregation={how} cohort={cohort_name(hospital)}")
+    frame = subset_stays(load_hourly(path, features), hospital)
     ids, array = build_tensor(frame, features)
     tensor = ttb.tensor(array)
     temporal = temporal_diagnostics(array)
@@ -330,14 +346,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--how", choices=["mean", "median", "last"], default="mean")
     parser.add_argument("--new", action="store_true")
+    parser.add_argument("--hospital", default=None)
     parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
     if args.plot_only:
-        results_dir = cpd_results_dir(args.how, new=args.new)
+        results_dir = cpd_results_dir(args.how, new=args.new, hospital=args.hospital)
         plot_factor_figures(results_dir)
         print(f"Factor figures saved to {results_dir}")
         return
-    run_cpd(how=args.how, new=args.new)
+    run_cpd(how=args.how, new=args.new, hospital=args.hospital)
 
 
 if __name__ == "__main__":

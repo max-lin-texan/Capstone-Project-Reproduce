@@ -22,6 +22,7 @@ from cpd import (
     RESULTS_ROOT,
     SEEDS,
     arrange_tensor,
+    decomposition_complete,
     load_hourly,
     plot_factor_figures,
     plot_fit,
@@ -30,17 +31,18 @@ from cpd import (
     save_factors,
     temporal_diagnostics,
 )
+from hospitals import cohort_name, subset_stays
 from data_preprocessing import DECIMAL_PLACES, FEATURES, NEW_FEATURES
 
 # pyttb logs a harmless factor-matrix layout warning on every iteration.
 logging.getLogger().setLevel(logging.ERROR)
 
-def nncpd_results_dir(how: str, new: bool = False) -> Path:
-    """Result directory for this aggregation."""
+def nncpd_results_dir(how: str, new: bool = False, hospital: str | None = None) -> Path:
+    """Result directory for this aggregation and cohort."""
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
     panel = "feature_11" if new else "feature_7"
-    return RESULTS_ROOT / panel / f"nncpd_{how}"
+    return RESULTS_ROOT / panel / cohort_name(hospital) / f"nncpd_{how}"
 
 
 CLIP_PCT = (1, 99)
@@ -102,16 +104,20 @@ def run_nncpd(
     path: Path | None = None,
     results_dir: Path | None = None,
     new: bool = False,
+    hospital: str | None = None,
 ) -> pd.DataFrame:
     """Fit ranks 1-10 and save factors, the fit summary, and the plot."""
     features = list(NEW_FEATURES if new else FEATURES)
+    if results_dir is None:
+        results_dir = nncpd_results_dir(how, new=new, hospital=hospital)
+    if decomposition_complete(results_dir):
+        print(f"reusing {results_dir}")
+        return pd.read_csv(results_dir / "fit_summary.csv")
     if path is None:
         path = prepare_imputed(how, new=new)
-    if results_dir is None:
-        results_dir = nncpd_results_dir(how, new=new)
     results_dir.mkdir(parents=True, exist_ok=True)
-    print(f"aggregation={how}")
-    frame = load_hourly(path, features)
+    print(f"aggregation={how} cohort={cohort_name(hospital)}")
+    frame = subset_stays(load_hourly(path, features), hospital)
     ids, array = build_tensor(frame, features)
     tensor = ttb.tensor(array)
     temporal = temporal_diagnostics(array)
@@ -162,14 +168,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--how", choices=["mean", "median", "last"], default="mean")
     parser.add_argument("--new", action="store_true")
+    parser.add_argument("--hospital", default=None)
     parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
     if args.plot_only:
-        results_dir = nncpd_results_dir(args.how, new=args.new)
+        results_dir = nncpd_results_dir(args.how, new=args.new, hospital=args.hospital)
         plot_factor_figures(results_dir)
         print(f"Factor figures saved to {results_dir}")
         return
-    run_nncpd(how=args.how, new=args.new)
+    run_nncpd(how=args.how, new=args.new, hospital=args.hospital)
 
 
 if __name__ == "__main__":

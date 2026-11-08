@@ -1,12 +1,14 @@
 """Time-aware soft clustering of the imputed hourly tensor.
 
 The three centroids are the curves in Figure 2 of Jiang et al.: liver, kidney,
-and lung. Each feature is z-scored. A patient may belong to more than one
-centroid. Single-organ diagnoses pull the matching centroid closer and push the
-other two away. The plot smooths those centroids; the saved curves are not
-smoothed.
+and lung. Each feature is z-scored inside the cohort being fit. A patient may
+belong to more than one centroid. Single-organ diagnoses pull the matching
+centroid closer and push the other two away. The default run uses the seven
+features and writes results/feature_7/overall/clustering/. ``--new`` uses the
+eleven features. ``--hospital hospital_1`` fits one mapped hospital.
 """
 
+import argparse
 from pathlib import Path
 
 import matplotlib
@@ -21,11 +23,12 @@ from data_preprocessing import (
     DECIMAL_PLACES,
     FEATURES,
     N_HOURS,
+    NEW_FEATURES,
     imputed_table_path,
 )
+from hospitals import cohort_name, subset_stays
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-RESULTS_DIR = PROJECT_DIR / "results" / "clustering"
 ORGANS = ("liver", "kidney", "lung")
 EARLY_FEATURES = ("arterial_bp_systolic", "base_excess", "respiratory_rate")
 EARLY_HOURS = 24
@@ -77,43 +80,56 @@ def organ_labels(icd_codes: np.ndarray) -> np.ndarray:
     return labels
 
 
-def load_imputed(path: Path | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_imputed(
+    path: Path | None = None,
+    features: list[str] | None = None,
+    hospital: str | None = None,
+    new: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return stay ids, the hourly tensor, and the ICD text for each stay."""
+    features = list(FEATURES if features is None else features)
     if path is None:
-        path = imputed_table_path("mean")
-    frame = pd.read_csv(
-        path,
-        usecols=["patientunitstayid", "icd_code", "hour", *FEATURES],
-    )
+        path = imputed_table_path("mean", new=new)
+    frame = pd.read_csv(path, usecols=["patientunitstayid", "hour", *features])
+    frame = subset_stays(frame, hospital)
+    if "icd_code" not in frame.columns:
+        diagnoses = pd.read_csv(
+            imputed_table_path("mean"),
+            usecols=["patientunitstayid", "icd_code"],
+        ).drop_duplicates("patientunitstayid")
+        frame = frame.merge(diagnoses, on="patientunitstayid", how="left")
+    frame["icd_code"] = frame["icd_code"].fillna("")
     ordered = frame.sort_values(["patientunitstayid", "hour"], kind="mergesort")
     ids = ordered["patientunitstayid"].drop_duplicates().to_numpy()
     counts = ordered.groupby("patientunitstayid", sort=False)["hour"].nunique()
     if not counts.eq(N_HOURS).all():
         raise ValueError("Every patient must have exactly one row in each hour")
-    values = ordered[FEATURES].to_numpy(dtype=float)
+    values = ordered[features].to_numpy(dtype=float)
     if not np.isfinite(values).all():
         raise ValueError("Imputed table contains NaN or infinite values")
-    array = values.reshape(len(ids), N_HOURS, len(FEATURES)).transpose(0, 2, 1)
-    icd = ordered.drop_duplicates("patientunitstayid")["icd_code"].fillna("").to_numpy()
+    array = values.reshape(len(ids), N_HOURS, len(features)).transpose(0, 2, 1)
+    icd = ordered.drop_duplicates("patientunitstayid")["icd_code"].to_numpy()
     return ids, array, icd
 
 
-def standardize(array: np.ndarray) -> np.ndarray:
+def standardize(array: np.ndarray, features: list[str] | None = None) -> np.ndarray:
     """Z-score each feature over patients and hours, using the sample standard deviation."""
+    features = list(FEATURES if features is None else features)
     mean = array.mean(axis=(0, 2), keepdims=True)
     std = array.std(axis=(0, 2), ddof=1, keepdims=True)
     if np.any(std <= 0):
-        constant = [FEATURES[k] for k in np.where(std[0, :, 0] <= 0)[0]]
+        constant = [features[k] for k in np.where(std[0, :, 0] <= 0)[0]]
         raise ValueError(f"Constant features: {constant}")
     return (array - mean) / std
 
 
-def distance_weight() -> np.ndarray:
+def distance_weight(features: list[str] | None = None) -> np.ndarray:
     """Square-difference weights. Early features use the first 24 hours, scaled by five."""
-    weight = np.ones((len(FEATURES), N_HOURS), dtype=float)
+    features = list(FEATURES if features is None else features)
+    weight = np.ones((len(features), N_HOURS), dtype=float)
     scale = N_HOURS / EARLY_HOURS
     for name in EARLY_FEATURES:
-        index = FEATURES.index(name)
+        index = features.index(name)
         weight[index, :] = 0
         weight[index, :EARLY_HOURS] = scale
     return weight
@@ -134,7 +150,8 @@ def membership_curves(centroids: np.ndarray, membership: np.ndarray) -> np.ndarr
     """Average of the centroids assigned to each patient."""
     counts = membership.sum(axis=1, keepdims=True)
     flat = membership @ centroids.reshape(len(ORGANS), -1)
-    return (flat / counts).reshape(len(membership), len(FEATURES), N_HOURS)
+    n_features, n_hours = centroids.shape[1:]
+    return (flat / counts).reshape(len(membership), n_features, n_hours)
 
 
 def assign_membership(
@@ -239,7 +256,8 @@ def calibration_gradient(
 
 def initial_centroids(data: np.ndarray, labels: np.ndarray) -> np.ndarray:
     """Mean curve of patients who have exactly one of the three organ labels."""
-    centroids = np.zeros((len(ORGANS), len(FEATURES), N_HOURS), dtype=float)
+    _, n_features, n_hours = data.shape
+    centroids = np.zeros((len(ORGANS), n_features, n_hours), dtype=float)
     single = labels.sum(axis=1) == 1
     for cluster, name in enumerate(ORGANS):
         members = single & labels[:, cluster]
@@ -254,10 +272,11 @@ def initial_centroids(data: np.ndarray, labels: np.ndarray) -> np.ndarray:
 def fit_centroids(
     data: np.ndarray,
     labels: np.ndarray,
+    features: list[str] | None = None,
     epochs: int = EPOCHS,
 ) -> np.ndarray:
     """Move centroids by the mean gradient. Stop when the loss increases."""
-    weight = distance_weight()
+    weight = distance_weight(features)
     centroids = initial_centroids(data, labels)
     membership = None
     accepted = centroids
@@ -314,12 +333,16 @@ def bootstrap_smooth(values: np.ndarray, grid: np.ndarray, seed: int = 0) -> tup
     )
 
 
-def plot_centroids(centroids: np.ndarray, path: Path) -> None:
-    """Seven panels, one per feature, with smoothed liver, kidney, and lung curves."""
+def plot_centroids(centroids: np.ndarray, path: Path, features: list[str] | None = None) -> None:
+    """One panel per feature, with smoothed liver, kidney, and lung curves."""
+    features = list(FEATURES if features is None else features)
+    ncols = 2 if len(features) <= 7 else 3
+    nrows = int(np.ceil(len(features) / ncols))
     grid = np.linspace(0, N_HOURS - 1, 50)
-    figure, axes = plt.subplots(4, 2, figsize=(12, 16), sharex=True)
-    for index, feature in enumerate(FEATURES):
-        axis = axes.ravel()[index]
+    figure, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), sharex=True)
+    flat = np.atleast_1d(axes).ravel()
+    for index, feature in enumerate(features):
+        axis = flat[index]
         for cluster, name in enumerate(ORGANS):
             mean, low, high = bootstrap_smooth(centroids[cluster, index], grid, seed=index)
             axis.fill_between(grid, low, high, color=COLORS[name], alpha=0.25)
@@ -335,20 +358,24 @@ def plot_centroids(centroids: np.ndarray, path: Path) -> None:
         axis.set_title(feature)
         axis.set_ylabel("Normalized values")
         axis.grid(alpha=0.3)
-    axes.ravel()[-1].axis("off")
-    for axis in axes[-1, :]:
-        axis.set_xlabel("Hours")
-    axes.ravel()[0].legend(loc="upper right")
+    for axis in flat[len(features):]:
+        axis.axis("off")
+    for index, axis in enumerate(flat):
+        below = index + ncols
+        if axis.axison and (below >= len(flat) or not flat[below].axison):
+            axis.set_xlabel("Hours")
+    flat[0].legend(loc="upper right")
     figure.tight_layout()
     figure.savefig(path, dpi=150)
     plt.close(figure)
 
 
-def save_centroids(centroids: np.ndarray, path: Path) -> None:
+def save_centroids(centroids: np.ndarray, path: Path, features: list[str] | None = None) -> None:
     """Unsmoothed centroid value for every cluster, feature, and hour."""
+    features = list(FEATURES if features is None else features)
     rows = []
     for cluster, name in enumerate(ORGANS):
-        for feature_index, feature in enumerate(FEATURES):
+        for feature_index, feature in enumerate(features):
             for hour in range(N_HOURS):
                 rows.append(
                     {
@@ -368,23 +395,50 @@ def save_labels(ids: np.ndarray, labels: np.ndarray, path: Path) -> None:
     frame.to_csv(path, index=False)
 
 
-def run(path: Path | None = None, results_dir: Path = RESULTS_DIR, epochs: int = EPOCHS) -> np.ndarray:
+def clustering_results_dir(new: bool = False, hospital: str | None = None) -> Path:
+    """Result directory for this feature panel and cohort."""
+    panel = "feature_11" if new else "feature_7"
+    return PROJECT_DIR / "results" / panel / cohort_name(hospital) / "clustering"
+
+
+def clustering_complete(results_dir: Path) -> bool:
+    """True when the centroid table, organ labels, and figure are already saved."""
+    return all((results_dir / name).exists() for name in ("centroids.csv", "icd_labels.csv", "figure2.png"))
+
+
+def run(
+    path: Path | None = None,
+    results_dir: Path | None = None,
+    epochs: int = EPOCHS,
+    new: bool = False,
+    hospital: str | None = None,
+) -> np.ndarray | None:
     """Fit the three centroids and write the figure, curves, and organ labels."""
+    features = list(NEW_FEATURES if new else FEATURES)
+    if results_dir is None:
+        results_dir = clustering_results_dir(new=new, hospital=hospital)
+    if clustering_complete(results_dir):
+        print(f"reusing {results_dir}")
+        return None
     results_dir.mkdir(parents=True, exist_ok=True)
-    ids, array, icd = load_imputed(path)
+    ids, array, icd = load_imputed(path, features=features, hospital=hospital, new=new)
     labels = organ_labels(icd)
-    print(f"{len(ids):,} patients, {len(FEATURES)} features, {N_HOURS} hours")
-    data = standardize(array)
-    centroids = fit_centroids(data, labels, epochs=epochs)
-    save_centroids(centroids, results_dir / "centroids.csv")
+    print(f"{len(ids):,} patients, {len(features)} features, {N_HOURS} hours")
+    data = standardize(array, features)
+    centroids = fit_centroids(data, labels, features=features, epochs=epochs)
+    save_centroids(centroids, results_dir / "centroids.csv", features)
     save_labels(ids, labels, results_dir / "icd_labels.csv")
-    plot_centroids(centroids, results_dir / "figure2.png")
+    plot_centroids(centroids, results_dir / "figure2.png", features)
     print(f"Results saved to {results_dir}")
     return centroids
 
 
 def main() -> None:
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--new", action="store_true")
+    parser.add_argument("--hospital", default=None)
+    args = parser.parse_args()
+    run(new=args.new, hospital=args.hospital)
 
 
 if __name__ == "__main__":
