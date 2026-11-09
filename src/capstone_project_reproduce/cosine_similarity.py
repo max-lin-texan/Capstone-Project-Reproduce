@@ -4,8 +4,12 @@ One experiment and one rank produce two heatmaps, one for feature loadings
 and one for time loadings. Components are matched on the absolute product of
 those two cosines, then each heatmap summarizes the matched pairs with a
 geometric mean. The rows are overall and the hospitals in hospital_map.csv.
+
+``--pooled-hospital`` reads the existing feature_11 CSVs and writes the
+pooled hospital comparison under cosine_similarity_heatmaps/pooled_hospital/.
 """
 
+import argparse
 from pathlib import Path
 
 import matplotlib
@@ -23,6 +27,9 @@ HOWS = ("mean", "median", "last")
 METHODS = ("cpd", "nncpd")
 RANKS = range(1, 11)
 OUTPUT_ROOT = RESULTS_ROOT / "cosine_similarity_heatmaps"
+POOLED_PANEL = "feature_11"
+POOLED_DIR = OUTPUT_ROOT / "pooled_hospital"
+KINDS = ("feature", "time")
 
 
 def cohort_labels() -> list[tuple[str, str | None]]:
@@ -121,8 +128,12 @@ def similarity_matrices(
 def save_heatmap(frame: pd.DataFrame, path: Path, title: str) -> None:
     """Write the annotated heatmap."""
     values = frame.to_numpy(float)
-    figure, axis = plt.subplots(figsize=(12, 10))
-    image = axis.imshow(values, vmin=0, vmax=1, cmap="viridis")
+    if len(frame.index) >= 10 and len(frame.columns) >= 10:
+        size = (12, 10)
+    else:
+        size = (max(6.0, 0.9 * len(frame.columns) + 2), max(4.5, 0.5 * len(frame.index) + 2))
+    figure, axis = plt.subplots(figsize=size)
+    image = axis.imshow(values, vmin=0, vmax=1, cmap="viridis", aspect="auto")
     axis.set_xticks(range(len(frame.columns)))
     axis.set_xticklabels(list(frame.columns), rotation=45, ha="right")
     axis.set_yticks(range(len(frame.index)))
@@ -138,7 +149,153 @@ def save_heatmap(frame: pd.DataFrame, path: Path, title: str) -> None:
     plt.close(figure)
 
 
-def main() -> None:
+def save_table(frame: pd.DataFrame, directory: Path, stem: str, title: str) -> None:
+    """Write a CSV and the matching heatmap."""
+    path = directory / stem
+    frame.to_csv(path.with_suffix(".csv"), float_format="%.5f")
+    save_heatmap(frame, path.with_suffix(".png"), title)
+    print(f"saved {path.with_suffix('.png')}")
+
+
+def slice_paths(panel: str = POOLED_PANEL) -> list[tuple[Path, str, str, int, str]]:
+    """Existing heatmap CSVs for one feature panel."""
+    found = []
+    for method in METHODS:
+        for how in HOWS:
+            for rank in RANKS:
+                for kind in KINDS:
+                    path = OUTPUT_ROOT / panel / f"{method}_{how}" / f"rank{rank}_{kind}.csv"
+                    found.append((path, method, how, rank, kind))
+    missing = [str(path) for path, *_ in found if not path.exists()]
+    if missing:
+        preview = "\n".join(missing[:8])
+        extra = "" if len(missing) <= 8 else f"\n... and {len(missing) - 8} more"
+        raise FileNotFoundError(f"Missing {len(missing)} {panel} heatmaps:\n{preview}{extra}")
+    return found
+
+
+def load_slices(panel: str = POOLED_PANEL) -> tuple[list[str], np.ndarray, pd.DataFrame]:
+    """Stack every heatmap and the overall-versus-hospital scores."""
+    paths = slice_paths(panel)
+    frames = [pd.read_csv(path, index_col=0) for path, *_ in paths]
+    labels = list(frames[0].index)
+    for frame in frames:
+        if list(frame.index) != labels or list(frame.columns) != labels:
+            raise ValueError("Heatmap labels do not match across files")
+    stack = np.stack([frame.to_numpy(dtype=float) for frame in frames])
+    hospitals = [name for name in labels if name != "overall"]
+    rows = []
+    for (_, method, how, rank, kind), frame in zip(paths, frames):
+        for hospital in hospitals:
+            rows.append(
+                {
+                    "method": method,
+                    "how": how,
+                    "rank": rank,
+                    "kind": kind,
+                    "hospital": hospital,
+                    "vs_overall": float(frame.loc["overall", hospital]),
+                }
+            )
+    return labels, stack, pd.DataFrame(rows)
+
+
+def disagreement_table(scores: pd.DataFrame) -> pd.DataFrame:
+    """Mean similarity to overall and D(i) = 1 - that mean."""
+    grouped = scores.groupby("hospital")["vs_overall"]
+    table = pd.DataFrame(
+        {
+            "S_bar": grouped.mean(),
+            "D": 1 - grouped.mean(),
+            "n_slices": grouped.size(),
+        }
+    )
+    table = table.sort_values("D", ascending=False)
+    table.insert(0, "rank_by_D", range(1, len(table) + 1))
+    table.index.name = "hospital"
+    return table
+
+
+def save_disagreement_bar(table: pd.DataFrame, path: Path) -> None:
+    """Bar chart of D(i), largest disagreement first."""
+    figure, axis = plt.subplots(figsize=(8, 4.5))
+    names = list(table.index)
+    axis.bar(range(len(names)), table["D"].to_numpy(dtype=float))
+    axis.set_xticks(range(len(names)))
+    axis.set_xticklabels(names, rotation=45, ha="right")
+    axis.set_ylabel("D(i)")
+    axis.set_xlabel("Hospital")
+    axis.set_title("Hospital disagreement versus overall (feature_11)")
+    axis.set_ylim(0, max(0.3, float(table["D"].max()) * 1.15))
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+    print(f"saved {path}")
+
+
+def save_disagreement_tex(table: pd.DataFrame, path: Path) -> None:
+    """LaTeX table of D(i), largest disagreement first."""
+    rows = []
+    for hospital, row in table.iterrows():
+        name = str(hospital).replace("_", r"\_")
+        rows.append(
+            f"{name} & {int(row['rank_by_D'])} & {row['S_bar']:.4f} & {row['D']:.4f} \\\\"
+        )
+    body = "\n".join(rows)
+    path.write_text(
+        "\\begin{table}[H]\n"
+        "\\centering\n"
+        "\\caption{Hospital disagreement versus overall (feature\\_11). "
+        "$\\bar S(i)$ is the pooled similarity to overall; $D(i)=1-\\bar S(i)$."
+        "}\n"
+        "\\begin{tabular}{lrrr}\n"
+        "\\hline\n"
+        "Hospital & Rank & $\\bar S(i)$ & $D(i)$ \\\\\n"
+        "\\hline\n"
+        f"{body}\n"
+        "\\hline\n"
+        "\\end{tabular}\n"
+        "\\end{table}\n"
+    )
+    print(f"saved {path}")
+
+
+def factor_table(scores: pd.DataFrame, factor: str, hospitals: list[str]) -> pd.DataFrame:
+    """Mean similarity to overall, rows in D(i) order."""
+    table = scores.pivot_table("vs_overall", "hospital", factor, aggfunc="mean")
+    return table.loc[hospitals]
+
+
+def run_pooled_hospital(panel: str = POOLED_PANEL) -> None:
+    """Average feature_11 heatmaps and write pooled_hospital/."""
+    labels, stack, scores = load_slices(panel)
+    pooled = pd.DataFrame(stack.mean(axis=0), index=labels, columns=labels)
+    table = disagreement_table(scores)
+    hospitals = list(table.index)
+    POOLED_DIR.mkdir(parents=True, exist_ok=True)
+    save_table(
+        pooled,
+        POOLED_DIR,
+        "pooled_heatmap",
+        f"{panel} pooled cosine heatmap (method, aggregation, rank, feature/time)",
+    )
+    table.to_csv(POOLED_DIR / "hospital_disagreement.csv", float_format="%.5f")
+    print(f"saved {POOLED_DIR / 'hospital_disagreement.csv'}")
+    save_disagreement_bar(table, POOLED_DIR / "disagreement_bar.png")
+    save_disagreement_tex(table, POOLED_DIR / "hospital_disagreement.tex")
+    for factor, stem, title in (
+        ("rank", "hospital_by_rank", f"{panel} mean S(overall, hospital) by rank"),
+        ("kind", "hospital_by_kind", f"{panel} mean S(overall, hospital) by feature/time"),
+        ("method", "hospital_by_method", f"{panel} mean S(overall, hospital) by method"),
+        ("how", "hospital_by_aggregation", f"{panel} mean S(overall, hospital) by aggregation"),
+    ):
+        save_table(factor_table(scores, factor, hospitals), POOLED_DIR, stem, title)
+    print(table.round(4).to_string())
+    print(f"wrote {len(stack)} slices to {POOLED_DIR}")
+
+
+def write_pairwise_heatmaps() -> None:
+    """Fit pairwise heatmaps for every panel, method, aggregation, and rank."""
     for new in (False, True):
         panel = "feature_11" if new else "feature_7"
         for method in METHODS:
@@ -157,6 +314,20 @@ def main() -> None:
                         combined = directory / f"rank{rank}{suffix}"
                         if combined.exists():
                             combined.unlink()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--pooled-hospital",
+        action="store_true",
+        help="average existing feature_11 heatmaps; do not refit pairwise maps",
+    )
+    args = parser.parse_args()
+    if args.pooled_hospital:
+        run_pooled_hospital()
+        return
+    write_pairwise_heatmaps()
 
 
 if __name__ == "__main__":
