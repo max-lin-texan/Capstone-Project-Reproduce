@@ -4,7 +4,8 @@ One experiment and one rank produce two heatmaps, one for feature loadings
 and one for time loadings. Components are matched by the Hungarian algorithm
 on the absolute product of those two cosines, then each heatmap summarizes
 the matched pairs with a geometric mean. The rows are overall and the
-hospitals in hospital_map.csv.
+hospitals in hospital_map.csv. Ranks are analyzed independently; no results
+are pooled across ranks or model settings.
 """
 
 from pathlib import Path
@@ -17,18 +18,22 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-from cpd import RESULTS_ROOT, cpd_results_dir
-from hospitals import MAP_PATH
-from nncpd import nncpd_results_dir
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+RESULTS_ROOT = PROJECT_DIR / "results"
 
 HOWS = ("mean", "median", "last")
 METHODS = ("cpd", "nncpd")
-RANKS = range(1, 11)
-OUTPUT_ROOT = RESULTS_ROOT / "cosine_similarity_heatmaps"
+RANKS = range(1, 16)
+OUTPUT_ROOT = RESULTS_ROOT / "cosine_similarity"
 
 
 def cohort_labels() -> list[tuple[str, str | None]]:
     """Display name and the hospital argument, with overall first."""
+    try:
+        from .hospitals import MAP_PATH
+    except ImportError:
+        from hospitals import MAP_PATH
+
     names = pd.read_csv(MAP_PATH)["name"].astype(str).tolist()
     return [*[(name, name) for name in names], ("overall", None)]
 
@@ -36,8 +41,18 @@ def cohort_labels() -> list[tuple[str, str | None]]:
 def results_dir(method: str, how: str, new: bool, hospital: str | None) -> Path:
     """Directory that holds this experiment's factor tables."""
     if method == "cpd":
+        try:
+            from .cpd import cpd_results_dir
+        except ImportError:
+            from cpd import cpd_results_dir
+
         return cpd_results_dir(how, new=new, hospital=hospital)
     if method == "nncpd":
+        try:
+            from .nncpd import nncpd_results_dir
+        except ImportError:
+            from nncpd import nncpd_results_dir
+
         return nncpd_results_dir(how, new=new, hospital=hospital)
     raise ValueError("method must be 'cpd' or 'nncpd'")
 

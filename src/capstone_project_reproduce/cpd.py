@@ -2,10 +2,10 @@
 
 Each feature is z-scored across patients and hours. Ranks 1-10 are fitted with
 several random starts. Factors, a fit summary, and a fit-versus-rank plot are
-saved under results/feature_7/overall/cpd_mean/, cpd_median/, or cpd_last/.
-``--new`` reads the eleven-feature table and writes the same names under
-results/feature_11/. ``--hospital hospital_1`` uses one mapped hospital and
-writes under that name instead of overall.
+saved under results/cpd&nncpd/feature_7/overall/cpd_mean/, cpd_median/, or
+cpd_last/. ``--new`` reads the eleven-feature table and writes the same names
+under results/cpd&nncpd/feature_11/. ``--hospital hospital_1`` uses one mapped
+hospital and writes under that name instead of overall.
 """
 
 import argparse
@@ -32,7 +32,7 @@ from hospitals import cohort_name, subset_stays
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = PROJECT_DIR / "results"
-RANKS = range(1, 11)
+RANKS = range(1, 16)
 SEEDS = range(5)
 HOURS = list(range(N_HOURS))
 
@@ -46,7 +46,7 @@ def cpd_results_dir(how: str, new: bool = False, hospital: str | None = None) ->
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
     panel = "feature_11" if new else "feature_7"
-    return RESULTS_ROOT / panel / cohort_name(hospital) / f"cpd_{how}"
+    return RESULTS_ROOT / "cpd&nncpd" / panel / cohort_name(hospital) / f"cpd_{how}"
 
 
 def decomposition_complete(results_dir: Path) -> bool:

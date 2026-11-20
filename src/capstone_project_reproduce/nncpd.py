@@ -42,7 +42,7 @@ def nncpd_results_dir(how: str, new: bool = False, hospital: str | None = None) 
     if how not in {"mean", "median", "last"}:
         raise ValueError("how must be 'mean', 'median', or 'last'")
     panel = "feature_11" if new else "feature_7"
-    return RESULTS_ROOT / panel / cohort_name(hospital) / f"nncpd_{how}"
+    return RESULTS_ROOT / "cpd&nncpd" / panel / cohort_name(hospital) / f"nncpd_{how}"
 
 
 CLIP_PCT = (1, 99)

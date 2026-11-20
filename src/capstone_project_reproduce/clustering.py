@@ -4,7 +4,7 @@ The three centroids are the curves in Figure 2 of Jiang et al.: liver, kidney,
 and lung. Each feature is z-scored inside the cohort being fit. A patient may
 belong to more than one centroid. Single-organ diagnoses pull the matching
 centroid closer and push the other two away. The default run uses the seven
-features and writes results/feature_7/overall/clustering/. ``--new`` uses the
+features and writes results/cpd&nncpd/feature_7/overall/clustering/. ``--new`` uses the
 eleven features. ``--hospital hospital_1`` fits one mapped hospital.
 """
 
@@ -405,7 +405,7 @@ def save_labels(ids: np.ndarray, labels: np.ndarray, path: Path) -> None:
 def clustering_results_dir(new: bool = False, hospital: str | None = None) -> Path:
     """Result directory for this feature panel and cohort."""
     panel = "feature_11" if new else "feature_7"
-    return PROJECT_DIR / "results" / panel / cohort_name(hospital) / "clustering"
+    return PROJECT_DIR / "results" / "cpd&nncpd" / panel / cohort_name(hospital) / "clustering"
 
 
 def clustering_complete(results_dir: Path) -> bool:

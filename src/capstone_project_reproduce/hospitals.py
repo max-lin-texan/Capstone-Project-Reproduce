@@ -54,15 +54,20 @@ def subset_stays(frame: pd.DataFrame, hospital: str | None) -> pd.DataFrame:
 def clear_previous_results() -> None:
     """Remove the 14-hospital outputs once, before the screened map is written."""
     results = MAP_PATH.parent
-    old_directory = (results / "feature_7" / "hospital_14").exists()
+    old_directory = (results / "cpd&nncpd" / "feature_7" / "hospital_14").exists()
     old_map = False
     if MAP_PATH.exists():
         names = set(pd.read_csv(MAP_PATH)["name"].astype(str))
         old_map = "hospital_14" in names
     if not old_directory and not old_map:
         return
-    for name in ("feature_7", "feature_11", "cosine_similarity_heatmaps"):
-        folder = results / name
+    for folder in (
+        results / "feature_7",
+        results / "feature_11",
+        results / "cosine_similarity_heatmaps",
+        results / "cosine_similarity",
+        results / "cpd&nncpd",
+    ):
         if folder.exists():
             shutil.rmtree(folder)
     if MAP_PATH.exists():
