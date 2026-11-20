@@ -143,9 +143,12 @@ Combined image 的設計：
   - 結果與 consensus labels 已輸出至 [patient_clustering_stability](results/patient_clustering_stability/)。
 - [ ] 以 nearby ranks 和 alternative methods 檢查 clustering stability。
 - [x] 先完成 overall model 上的分析及 seed stability。
-- [ ] 將相同 NNCPD feature_11/last/rank9 設定對各 hospital model 重複。
-- [ ] 跨 hospital 比較時處理 cluster label alignment，不能直接假設不同資料中的 cluster 1 代表同一群。
-- [ ] 新增 hospital cluster comparison script，對齊 cluster profile 並製作 cross-hospital heatmap。
+- [x] 對 NNCPD feature_11 使用各 hospital 的 selected rank，對 overall 與 hospital_1--hospital_10 執行 K-means k=4。
+- [x] 產出 [hospital_cluster_labels.csv](results/patient_clustering/hospital_comparison/hospital_cluster_labels.csv)、[hospital_cluster_profiles.csv](results/patient_clustering/hospital_comparison/hospital_cluster_profiles.csv)、[hospital_cluster_sizes.csv](results/patient_clustering/hospital_comparison/hospital_cluster_sizes.csv)。
+- [x] 新增 [compare_hospital_clusters.py](src/capstone_project_reproduce/compare_hospital_clusters.py)，使用 feature/time component alignment 將不同 rank 的 hospital model 對齊到 overall rank9。
+- [x] 產出 [overall_vs_hospital_profile_alignment.csv](results/patient_clustering/hospital_comparison/overall_vs_hospital_profile_alignment.csv) 與 [hospital_profile_cosine_heatmap.png](results/patient_clustering/hospital_comparison/hospital_profile_cosine_heatmap.png)。
+- [ ] 依 profile cosine 與 cluster size 人工驗證 cross-hospital cluster mapping，不直接假設相同數字代表相同 subgroup。
+- [ ] 完成 common/hospital-specific pattern 的醫療與時間模式解讀。
 - [ ] 不把 patient mode 限制成 cosine similarity；以 cluster metrics、cluster profiles 和 stability comparison 判斷結果。
 
 建議輸出：
@@ -202,8 +205,8 @@ results/patient_clustering/
 		-> [已完成] selected-model comparison figures
 		-> [已完成] overall patient-factor clustering
 		-> [已完成] overall seed stability：k=2、k=4 均高度穩定
-		-> [下一步] hospital patient-factor clustering 與比較
-		-> [下一步] cluster interpretation 和 cross-hospital alignment
+		-> [已完成] hospital patient-factor clustering 與 profile alignment
+		-> [下一步] cluster interpretation 和 common/hospital-specific pattern analysis
 		-> [最後] 最終研究結論與報告圖表
 ```
 

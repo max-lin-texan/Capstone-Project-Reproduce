@@ -14,6 +14,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
@@ -212,6 +213,49 @@ def plot_model_selection_summary(summary: pd.DataFrame, path: Path) -> None:
     plt.close(figure)
 
 
+def plot_model_selection_fit_summary(summary: pd.DataFrame, path: Path) -> None:
+    """Plot only the CPD and NNCPD selected-fit panels."""
+    required = {"method", "aggregation", "rank", "best_fit", "second_level_role"}
+    missing = required - set(summary.columns)
+    if missing:
+        raise ValueError(f"Missing columns in model selection summary: {sorted(missing)}")
+
+    methods = list(summary["method"].drop_duplicates())
+    figure, axes = plt.subplots(1, len(methods), figsize=(12, 5), constrained_layout=True, squeeze=False)
+    colors = {"primary": "#d95f02", "sensitivity": "#1b9e77"}
+
+    for axis, method in zip(axes[0], methods):
+        subset = summary[summary["method"].eq(method)].sort_values("aggregation")
+        bars = axis.bar(
+            subset["aggregation"],
+            subset["best_fit"],
+            color=[colors[role] for role in subset["second_level_role"]],
+        )
+        for bar, (_, row) in zip(bars, subset.iterrows()):
+            axis.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"rank {int(row['rank'])}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        axis.set_title(f"{method.upper()} selected fit")
+        axis.set_xlabel("Aggregation")
+        axis.set_ylabel("Fit")
+        axis.set_ylim(0, max(1.0, float(subset["best_fit"].max()) * 1.18))
+        axis.grid(axis="y", alpha=0.25)
+
+    handles = [
+        Patch(color=colors["primary"], label="Primary"),
+        Patch(color=colors["sensitivity"], label="Sensitivity"),
+    ]
+    figure.legend(handles=handles, loc="lower center", ncol=2, frameon=False)
+    figure.suptitle("Second-level model selection: selected fit")
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
 def plot_combined_hospital_map(
     models: pd.DataFrame,
     results_root: Path,
@@ -317,8 +361,11 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     summary = pd.read_csv(summary_path)
     summary_figure = model_selection_root / "model_selection_summary.png"
+    fit_summary_figure = model_selection_root / "model_selection_summary_fit_only.png"
     plot_model_selection_summary(summary, summary_figure)
+    plot_model_selection_fit_summary(summary, fit_summary_figure)
     print(f"Saved model selection summary to {summary_figure}")
+    print(f"Saved fit-only model selection summary to {fit_summary_figure}")
     for _, primary in primary_models.iterrows():
         visualize_primary_model(primary, selection, results_root, output_root)
         print(
