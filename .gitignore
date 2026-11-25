@@ -17,3 +17,6 @@ docs/
 # SLURM files
 *.sbatch
 *.out
+
+# Other
+secret.md
